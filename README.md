@@ -1,4 +1,4 @@
-# Simple Annotation App
+# LiteAnnotate
 
 This is a lightweight annotation application that requires only PHP and MySQL. It's designed for efficient text classification tasks with multiple annotators.
 
@@ -36,7 +36,9 @@ This is a lightweight annotation application that requires only PHP and MySQL. I
 
 ## Screenshots
 
-![Annotation interface](screenshot1.png)
+![Annotation project choice](screenshot1.png)
+
+![Annotation interface](screenshot3.png)
 
 ![Admin interface](screenshot2.png)
 
