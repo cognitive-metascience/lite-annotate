@@ -18,13 +18,24 @@ try {
     $pdo = new PDO("mysql:host=$host", $username, $password);
     $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 
+    // Guard: refuse to run if a superannotator already exists (unless force override)
+    $dbExists = $pdo->query("SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = " . $pdo->quote($database))->fetchColumn();
+    if ($dbExists) {
+        $pdo->exec("USE `$database`");
+        $stmt = $pdo->query("SELECT COUNT(*) FROM users WHERE role = 'superannotator'");
+        $adminCount = (int) $stmt->fetchColumn();
+        if ($adminCount > 0 && !isset($_GET['force'])) {
+            die("Setup has already been run (superannotator exists). Use ?force=1 to re-run in upgrade mode.<br>");
+        }
+    }
+
     // Create database
-    $sql = "CREATE DATABASE IF NOT EXISTS $database";
+    $sql = "CREATE DATABASE IF NOT EXISTS `$database`";
     $pdo->exec($sql);
     echo "Database created successfully<br>";
 
     // Use the new database
-    $pdo->exec("USE $database");
+    $pdo->exec("USE `$database`");
 
     // Create users table
     $sql = "CREATE TABLE IF NOT EXISTS users (

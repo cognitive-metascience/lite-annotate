@@ -23,11 +23,6 @@ if (!$projectDetails) {
 
 $projectChoices = parseDecisionChoices($projectDetails['choice_schema'] ?? null);
 
-// Initialize session for current snippet tracking
-if (session_status() == PHP_SESSION_NONE) {
-    session_start();
-}
-
 // Get disagreement snippets if not in session or if the project changed
 if (!isset($_SESSION['disagreement_snippets']) || ($_SESSION['disagreement_project_id'] ?? null) != $projectId) {
     $_SESSION['disagreement_snippets'] = getSnippetsWithDisagreements($projectId);
@@ -37,6 +32,9 @@ if (!isset($_SESSION['disagreement_snippets']) || ($_SESSION['disagreement_proje
 
 // Handle navigation
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    if (!csrfCheck()) {
+        die('Invalid CSRF token. Please go back and try again.');
+    }
     $snippetId = $_POST['snippet_id'] ?? null;
     $decision = $_POST['decision'] ?? null;
     if ($snippetId !== null && $decision !== null && isValidDecisionChoice($decision, $projectChoices)) {
@@ -129,6 +127,7 @@ if ($currentSnippet) {
 
             <form method="post" class="mt-3">
                 <input type="hidden" name="snippet_id" value="<?php echo $currentSnippet['id']; ?>">
+                <?php echo csrfField(); ?>
                 <div class="d-flex flex-wrap gap-2">
                     <?php foreach ($projectChoices as $index => $choice): ?>
                         <button

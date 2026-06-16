@@ -12,28 +12,32 @@ $error = '';
 $success = '';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $currentPassword = $_POST['current_password'];
-    $newPassword = $_POST['new_password'];
-    $confirmPassword = $_POST['confirm_password'];
-
-    if ($newPassword !== $confirmPassword) {
-        $error = 'New passwords do not match.';
+    if (!csrfCheck()) {
+        $error = 'Invalid form submission. Please try again.';
     } else {
-        $userId = $_SESSION['user_id'];
-        $stmt = $pdo->prepare("SELECT password FROM users WHERE id = ?");
-        $stmt->execute([$userId]);
-        $user = $stmt->fetch();
+        $currentPassword = $_POST['current_password'];
+        $newPassword = $_POST['new_password'];
+        $confirmPassword = $_POST['confirm_password'];
 
-        if (password_verify($currentPassword, $user['password'])) {
-            $hashedPassword = password_hash($newPassword, PASSWORD_DEFAULT);
-            $stmt = $pdo->prepare("UPDATE users SET password = ? WHERE id = ?");
-            if ($stmt->execute([$hashedPassword, $userId])) {
-                $success = 'Password changed successfully.';
-            } else {
-                $error = 'An error occurred while changing the password.';
-            }
+        if ($newPassword !== $confirmPassword) {
+            $error = 'New passwords do not match.';
         } else {
-            $error = 'Current password is incorrect.';
+            $userId = $_SESSION['user_id'];
+            $stmt = $pdo->prepare("SELECT password FROM users WHERE id = ?");
+            $stmt->execute([$userId]);
+            $user = $stmt->fetch();
+
+            if (password_verify($currentPassword, $user['password'])) {
+                $hashedPassword = password_hash($newPassword, PASSWORD_DEFAULT);
+                $stmt = $pdo->prepare("UPDATE users SET password = ? WHERE id = ?");
+                if ($stmt->execute([$hashedPassword, $userId])) {
+                    $success = 'Password changed successfully.';
+                } else {
+                    $error = 'An error occurred while changing the password.';
+                }
+            } else {
+                $error = 'Current password is incorrect.';
+            }
         }
     }
 }
@@ -57,6 +61,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             <div class="alert alert-success"><?php echo htmlspecialchars($success); ?></div>
         <?php endif; ?>
         <form method="post">
+            <?php echo csrfField(); ?>
             <div class="mb-3">
                 <label for="current_password" class="form-label">Current Password</label>
                 <input type="password" class="form-control" id="current_password" name="current_password" required>

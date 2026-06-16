@@ -78,27 +78,19 @@ function getAnnotatedSnippetsCount($userId, $projectId) {
 
 function saveAnnotation($userId, $snippetId, $decision) {
     global $pdo;
-    $pdo->beginTransaction();
-
-    try {
-        $stmt = $pdo->prepare("DELETE FROM annotations WHERE user_id = ? AND snippet_id = ?");
-        $stmt->execute([$userId, $snippetId]);
-
-        $stmt = $pdo->prepare("INSERT INTO annotations (user_id, snippet_id, decision) VALUES (?, ?, ?)");
-        $stmt->execute([$userId, $snippetId, $decision]);
-
-        $pdo->commit();
-    } catch (Exception $exception) {
-        $pdo->rollBack();
-        throw $exception;
-    }
+    $stmt = $pdo->prepare("
+        INSERT INTO annotations (user_id, snippet_id, decision)
+        VALUES (?, ?, ?)
+        ON DUPLICATE KEY UPDATE decision = VALUES(decision)
+    ");
+    $stmt->execute([$userId, $snippetId, $decision]);
 }
 
 function highlightSnippet($content, $highlight) {
     if (empty($highlight)) {
         return $content;
     }
-    return str_replace($highlight, "<span class='highlight'>$highlight</span>", $content);
+    return str_ireplace($highlight, "<span class='highlight'>$highlight</span>", $content);
 }
 
 function getSnippetsWithDisagreements($projectId) {
@@ -137,20 +129,12 @@ function getSnippetsWithDisagreements($projectId) {
 
 function saveFinalDecision($snippetId, $decision) {
     global $pdo;
-    $pdo->beginTransaction();
-
-    try {
-        $stmt = $pdo->prepare("DELETE FROM final_decisions WHERE snippet_id = ?");
-        $stmt->execute([$snippetId]);
-
-        $stmt = $pdo->prepare("INSERT INTO final_decisions (snippet_id, decision) VALUES (?, ?)");
-        $stmt->execute([$snippetId, $decision]);
-
-        $pdo->commit();
-    } catch (Exception $exception) {
-        $pdo->rollBack();
-        throw $exception;
-    }
+    $stmt = $pdo->prepare("
+        INSERT INTO final_decisions (snippet_id, decision)
+        VALUES (?, ?)
+        ON DUPLICATE KEY UPDATE decision = VALUES(decision)
+    ");
+    $stmt->execute([$snippetId, $decision]);
 }
 
 function calculateCohenKappa($projectId) {
@@ -240,24 +224,35 @@ function checkAnnotatorConsistency($projectId) {
     $stmt->execute([$projectId]);
     $annotations = $stmt->fetchAll(PDO::FETCH_ASSOC);
     
-    $consistencyResults = [];
-    
+    // Group by (user_id, content) so each duplicate set is processed once
+    $groups = [];
     foreach ($annotations as $annotation) {
         $userId = $annotation['user_id'];
         $content = $annotation['content'];
+        $key = $userId . '||' . $content;
+        if (!isset($groups[$key])) {
+            $groups[$key] = ['user_id' => $userId, 'decisions' => []];
+        }
+        $groups[$key]['decisions'][] = $annotation['decision'];
+    }
+    
+    $consistencyResults = [];
+    
+    foreach ($groups as $group) {
+        $decisions = $group['decisions'];
+        $userId = $group['user_id'];
+        $count = count($decisions);
+        if ($count < 2) {
+            continue;
+        }
         
         if (!isset($consistencyResults[$userId])) {
             $consistencyResults[$userId] = ['total' => 0, 'consistent' => 0];
         }
         
-        $duplicates = array_filter($annotations, function($a) use ($content, $userId) {
-            return $a['content'] == $content && $a['user_id'] == $userId;
-        });
-        
-        if (count($duplicates) > 1) {
-            $consistencyResults[$userId]['total'] += count($duplicates);
-            $decisions = array_column($duplicates, 'decision');
-            $consistencyResults[$userId]['consistent'] += (count(array_unique($decisions)) === 1) ? count($duplicates) : 0;
+        $consistencyResults[$userId]['total'] += $count;
+        if (count(array_unique($decisions)) === 1) {
+            $consistencyResults[$userId]['consistent'] += $count;
         }
     }
     
@@ -294,6 +289,25 @@ function createDefaultAdminAccount() {
 
 function createUser($username, $password, $role) {
     global $pdo;
+
+    // Validate inputs
+    $username = trim((string) $username);
+    if (strlen($username) < 2 || strlen($username) > 50) {
+        throw new InvalidArgumentException('Username must be between 2 and 50 characters.');
+    }
+    if (!preg_match('/^[a-zA-Z0-9_\-]+$/', $username)) {
+        throw new InvalidArgumentException('Username may only contain letters, digits, underscores, and hyphens.');
+    }
+
+    if (strlen((string) $password) < 8) {
+        throw new InvalidArgumentException('Password must be at least 8 characters.');
+    }
+
+    $validRoles = ['annotator', 'superannotator'];
+    if (!in_array($role, $validRoles, true)) {
+        throw new InvalidArgumentException('Role must be one of: ' . implode(', ', $validRoles));
+    }
+
     $hashedPassword = password_hash($password, PASSWORD_DEFAULT);
     $stmt = $pdo->prepare("INSERT INTO users (username, password, role) VALUES (?, ?, ?)");
     return $stmt->execute([$username, $hashedPassword, $role]);

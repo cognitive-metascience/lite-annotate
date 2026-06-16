@@ -11,6 +11,10 @@ if (!isLoggedIn() || !isSuperannotator()) {
 
 // Handle form submissions
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    if (!csrfCheck()) {
+        die('Invalid CSRF token. Please go back and try again.');
+    }
+
     if (isset($_POST['import_json'])) {
         handleJsonImport();
     } elseif (isset($_POST['export_json'])) {
@@ -19,50 +23,42 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         handleCreateProject();
     } elseif (isset($_POST['update_project_settings'])) {
         handleUpdateProjectSettings();
-    }
-}
-
-// Handle user creation
-if (isset($_POST['create_user'])) {
-    $username = $_POST['username'];
-    $password = $_POST['password'];
-    $role = $_POST['role'];
-    if (createUser($username, $password, $role)) {
-        echo "<div class='alert alert-success'>User created successfully.</div>";
-    } else {
-        echo "<div class='alert alert-danger'>Error creating user.</div>";
-    }
-}
-
-// Handle user deletion
-if (isset($_POST['delete_user'])) {
-    $userId = $_POST['user_id'];
-    if (deleteUser($userId)) {
-        echo "<div class='alert alert-success'>User deleted successfully.</div>";
-    } else {
-        echo "<div class='alert alert-danger'>Error deleting user.</div>";
-    }
-}
-
-// Handle project assignment
-if (isset($_POST['assign_project'])) {
-    $userId = $_POST['user_id'];
-    $projectId = $_POST['project_id'];
-    if (assignUserToProject($userId, $projectId)) {
-        echo "<div class='alert alert-success'>User assigned to project successfully.</div>";
-    } else {
-        echo "<div class='alert alert-danger'>Error assigning user to project.</div>";
-    }
-}
-
-// Handle project removal
-if (isset($_POST['remove_project'])) {
-    $userId = $_POST['user_id'];
-    $projectId = $_POST['project_id'];
-    if (removeUserFromProject($userId, $projectId)) {
-        echo "<div class='alert alert-success'>User removed from project successfully.</div>";
-    } else {
-        echo "<div class='alert alert-danger'>Error removing user from project.</div>";
+    } elseif (isset($_POST['create_user'])) {
+        $username = $_POST['username'];
+        $password = $_POST['password'];
+        $role = $_POST['role'];
+        try {
+            if (createUser($username, $password, $role)) {
+                echo "<div class='alert alert-success'>User created successfully.</div>";
+            } else {
+                echo "<div class='alert alert-danger'>Error creating user.</div>";
+            }
+        } catch (InvalidArgumentException $e) {
+            echo "<div class='alert alert-danger'>" . htmlspecialchars($e->getMessage()) . "</div>";
+        }
+    } elseif (isset($_POST['delete_user'])) {
+        $userId = $_POST['user_id'];
+        if (deleteUser($userId)) {
+            echo "<div class='alert alert-success'>User deleted successfully.</div>";
+        } else {
+            echo "<div class='alert alert-danger'>Error deleting user.</div>";
+        }
+    } elseif (isset($_POST['assign_project'])) {
+        $userId = $_POST['user_id'];
+        $projectId = $_POST['project_id'];
+        if (assignUserToProject($userId, $projectId)) {
+            echo "<div class='alert alert-success'>User assigned to project successfully.</div>";
+        } else {
+            echo "<div class='alert alert-danger'>Error assigning user to project.</div>";
+        }
+    } elseif (isset($_POST['remove_project'])) {
+        $userId = $_POST['user_id'];
+        $projectId = $_POST['project_id'];
+        if (removeUserFromProject($userId, $projectId)) {
+            echo "<div class='alert alert-success'>User removed from project successfully.</div>";
+        } else {
+            echo "<div class='alert alert-danger'>Error removing user from project.</div>";
+        }
     }
 }
 
@@ -92,6 +88,17 @@ function handleJsonImport() {
 
     $projectId = $_POST['project_id'];
     $tempFilePath = $_FILES['json_file']['tmp_name'];
+
+    // Validate MIME type
+    $finfo = finfo_open(FILEINFO_MIME_TYPE);
+    $mimeType = finfo_file($finfo, $tempFilePath);
+    finfo_close($finfo);
+
+    $allowedMimeTypes = ['application/json', 'text/plain', 'text/json'];
+    if (!in_array($mimeType, $allowedMimeTypes, true)) {
+        echo "<div class='alert alert-danger'>Invalid file type: $mimeType. Only JSON files are accepted.</div>";
+        return;
+    }
 
     try {
         $jsonData = file_get_contents($tempFilePath);
@@ -268,6 +275,7 @@ function handleUpdateProjectSettings() {
                     <?php endforeach; ?>
                 </select>
             </div>
+            <?php echo csrfField(); ?>
             <button type="submit" name="import_json" class="btn btn-primary">Import JSON</button>
         </form>
         
@@ -369,6 +377,7 @@ function handleUpdateProjectSettings() {
                     <?php endforeach; ?>
                 </select>
             </div>
+            <?php echo csrfField(); ?>
             <button type="submit" name="export_json" class="btn btn-primary">Export JSON</button>
         </form>
 
@@ -387,6 +396,7 @@ function handleUpdateProjectSettings() {
                 <textarea class="form-control" id="project_choices" name="project_choices" rows="4" placeholder="Yes | 1 | yes&#10;No | 2 | no"></textarea>
                 <div class="form-text">One choice per line in the format Label | Shortcut | Value. Leave blank to use the default Yes/No choices.</div>
             </div>
+            <?php echo csrfField(); ?>
             <button type="submit" name="create_project" class="btn btn-primary">Create Project</button>
         </form>
 
@@ -419,6 +429,7 @@ function handleUpdateProjectSettings() {
                     <textarea class="form-control" id="project_settings_choices" name="project_settings_choices" rows="4"><?php echo htmlspecialchars(serializeDecisionChoicesToText(parseDecisionChoices($selectedProjectSettings['choice_schema'] ?? null))); ?></textarea>
                     <div class="form-text">One choice per line in the format Label | Shortcut | Value.</div>
                 </div>
+                <?php echo csrfField(); ?>
                 <button type="submit" name="update_project_settings" class="btn btn-primary">Update Project Settings</button>
             </form>
         <?php endif; ?>
@@ -440,6 +451,7 @@ function handleUpdateProjectSettings() {
                     <option value="superannotator">Superannotator</option>
                 </select>
             </div>
+            <?php echo csrfField(); ?>
             <button type="submit" name="create_user" class="btn btn-primary">Create User</button>
         </form>
 
@@ -460,6 +472,7 @@ function handleUpdateProjectSettings() {
                         <td>
                             <form method="post" class="d-inline">
                                 <input type="hidden" name="user_id" value="<?php echo $user['id']; ?>">
+                                <?php echo csrfField(); ?>
                                 <button type="submit" name="delete_user" class="btn btn-sm btn-danger" onclick="return confirm('Are you sure you want to delete this user?')">Delete</button>
                             </form>
                         </td>
@@ -486,6 +499,7 @@ function handleUpdateProjectSettings() {
                     <?php endforeach; ?>
                 </select>
             </div>
+            <?php echo csrfField(); ?>
             <button type="submit" name="assign_project" class="btn btn-primary">Assign to Project</button>
         </form>
 
@@ -503,6 +517,7 @@ function handleUpdateProjectSettings() {
                             <form method="post" class="d-inline">
                                 <input type="hidden" name="user_id" value="<?php echo $user['id']; ?>">
                                 <input type="hidden" name="project_id" value="<?php echo $project['id']; ?>">
+                                <?php echo csrfField(); ?>
                                 <button type="submit" name="remove_project" class="btn btn-sm btn-warning">Remove</button>
                             </form>
                         </li>

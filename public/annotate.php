@@ -49,11 +49,6 @@ if ($projectId) {
     $stmtAnnotated->execute([$userId, $projectId]);
     $annotatedSnippets = $stmtAnnotated->fetchColumn();
 
-    // Start the session if not already started
-    if (session_status() == PHP_SESSION_NONE) {
-        session_start();        
-    }
-
     // Initialize the current ID if not set
     if (!isset($_SESSION['currentId'])) {
         $snippet = getCurrentSnippet($userId, $projectId);
@@ -63,18 +58,37 @@ if ($projectId) {
     $currentId = $_SESSION['currentId'];
 
     if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+        if (!csrfCheck()) {
+            die('Invalid CSRF token. Please go back and try again.');
+        }
         $decision = $_POST['decision'] ?? null;
         if ($decision !== null && isValidDecisionChoice($decision, $projectChoices)) {
             saveAnnotation($userId, $currentId, $decision);
-            $currentId++;
+            // Move to next snippet by ID (handles gaps)
+            $stmt = $pdo->prepare("SELECT MIN(id) FROM snippets WHERE project_id = ? AND id > ?");
+            $stmt->execute([$projectId, $currentId]);
+            $nextId = $stmt->fetchColumn();
+            if ($nextId) {
+                $currentId = (int) $nextId;
+            }
         } elseif ($decision !== null) {
             $decisionError = 'Invalid annotation choice for this project.';
         }
     } elseif (isset($_GET['action'])) {
         if ($_GET['action'] === 'prev') {
-            $currentId--;
+            $stmt = $pdo->prepare("SELECT MAX(id) FROM snippets WHERE project_id = ? AND id < ?");
+            $stmt->execute([$projectId, $currentId]);
+            $prevId = $stmt->fetchColumn();
+            if ($prevId) {
+                $currentId = (int) $prevId;
+            }
         } elseif ($_GET['action'] === 'next') {
-            $currentId++;
+            $stmt = $pdo->prepare("SELECT MIN(id) FROM snippets WHERE project_id = ? AND id > ?");
+            $stmt->execute([$projectId, $currentId]);
+            $nextId = $stmt->fetchColumn();
+            if ($nextId) {
+                $currentId = (int) $nextId;
+            }
         }
     } elseif (isset($_GET['go_to'])) {
         $currentId = intval($_GET['go_to']);
@@ -82,7 +96,7 @@ if ($projectId) {
 
     $snippet = getSpecificSnippet($userId, $projectId, $currentId);
 
-    // If no snippet is found (e.g., reached the end or beginning), adjust the currentId
+    // If the go_to target doesn't exist, fall back to closest
     if (!$snippet) {
         $stmt = $pdo->prepare("SELECT MIN(id) as min_id, MAX(id) as max_id FROM snippets WHERE project_id = ?");
         $stmt->execute([$projectId]);
@@ -186,6 +200,7 @@ if ($projectId) {
             <?php echo highlightSnippet($snippet['content'], $snippet['highlight']); ?>
         </div>
         <form method="post" class="mt-3">
+            <?php echo csrfField(); ?>
             <div class="d-flex flex-wrap gap-2">
                 <?php foreach ($projectChoices as $index => $choice): ?>
                     <button
