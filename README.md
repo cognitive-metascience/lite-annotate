@@ -114,7 +114,7 @@ This project is licensed under the MIT License. See the [LICENSE](LICENSE) file 
 
 ## Author
 
-(C) Marcin Miłkowski, 2024
+(C) Marcin Miłkowski, 2024-2026
 
 ## Contributing
 

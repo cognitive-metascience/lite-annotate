@@ -151,6 +151,7 @@ if ($projectId) {
                     <span class="navbar-text me-3">
                         Welcome, <?php echo htmlspecialchars($_SESSION['username']); ?>
                     </span>
+                    <span class="navbar-text me-3 text-muted small">v<?php echo APP_VERSION; ?></span>
                     <a class="nav-link" href="change_password.php">Change Password</a>
                     <a class="nav-link" href="logout.php">Logout</a>
                 </div>

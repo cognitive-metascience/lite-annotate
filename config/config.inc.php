@@ -7,3 +7,4 @@ if (!defined('BASE_URL')) {
     define('BASE_URL', "$scheme://$host$basePath");
 }
 define('ITEMS_PER_PAGE', 10);
+define('APP_VERSION', trim(file_get_contents(__DIR__ . '/../VERSION')));
