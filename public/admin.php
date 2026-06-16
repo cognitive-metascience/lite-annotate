@@ -17,6 +17,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         handleJsonExport();
     } elseif (isset($_POST['create_project'])) {
         handleCreateProject();
+    } elseif (isset($_POST['update_project_settings'])) {
+        handleUpdateProjectSettings();
     }
 }
 
@@ -68,10 +70,21 @@ $users = getUsers();
 
 // Get list of projects
 $projects = getProjects();
+$selectedProjectSettingsId = $_GET['settings_project_id'] ?? ($projects[0]['id'] ?? null);
+$selectedProjectSettings = null;
+
+foreach ($projects as $project) {
+    if ((string) $project['id'] === (string) $selectedProjectSettingsId) {
+        $selectedProjectSettings = $project;
+        break;
+    }
+}
 
 // Add these functions at the top of admin.php
 
 function handleJsonImport() {
+    global $pdo;
+
     if (!isset($_FILES['json_file']) || $_FILES['json_file']['error'] !== UPLOAD_ERR_OK) {
         echo "<div class='alert alert-danger'>Error uploading file.</div>";
         return;
@@ -88,7 +101,6 @@ function handleJsonImport() {
             throw new Exception("Invalid JSON file: " . json_last_error_msg());
         }
 
-        global $pdo;
         $pdo->beginTransaction();
 
         $stmt = $pdo->prepare("INSERT INTO snippets (project_id, content, highlight) VALUES (?, ?, ?)");
@@ -104,16 +116,18 @@ function handleJsonImport() {
         $pdo->commit();
         echo "<div class='alert alert-success'>JSON data imported successfully.</div>";
     } catch (Exception $e) {
-        $pdo->rollBack();
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
         echo "<div class='alert alert-danger'>Error importing JSON data: " . htmlspecialchars($e->getMessage()) . "</div>";
     }
 }
 
 function handleJsonExport() {
     $projectId = $_POST['export_project_id'];
+    global $pdo;
 
     try {
-        global $pdo;
         $stmt = $pdo->prepare("
             WITH annotation_summary AS (
                 SELECT 
@@ -128,7 +142,7 @@ function handleJsonExport() {
                 s.id, 
                 s.content, 
                 s.highlight,
-                GROUP_CONCAT(DISTINCT a.decision) as annotations,
+                GROUP_CONCAT(a.decision ORDER BY a.user_id) as annotations,
                 fd.decision as final_decision,
                 ans.unique_decisions,
                 CASE 
@@ -146,8 +160,7 @@ function handleJsonExport() {
 
         $data = [];
         while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
-            // Convert annotations string to array of integers
-            $annotations = $row['annotations'] ? array_map('intval', explode(',', $row['annotations'])) : [];
+            $annotations = $row['annotations'] ? explode(',', $row['annotations']) : [];
             
             // Determine the final decision:
             // 1. If there's a final_decision from superannotator, use that
@@ -155,9 +168,9 @@ function handleJsonExport() {
             // 3. Otherwise, it's null
             $finalDecision = null;
             if ($row['final_decision'] !== null) {
-                $finalDecision = $row['final_decision'] == 1;
+                $finalDecision = $row['final_decision'];
             } elseif ($row['unanimous_decision'] !== null) {
-                $finalDecision = $row['unanimous_decision'] == 1;
+                $finalDecision = $row['unanimous_decision'];
             }
 
             $item = [
@@ -184,21 +197,28 @@ function handleJsonExport() {
 function handleCreateProject() {
     $projectName = $_POST['project_name'];
     $projectInstructions = $_POST['project_instructions'];
+    $projectChoices = $_POST['project_choices'] ?? '';
 
     try {
-        global $pdo;
-        $stmt = $pdo->prepare("INSERT INTO projects (name, instructions) VALUES (?, ?)");
-        $stmt->execute([$projectName, $projectInstructions]);
+        createProject($projectName, $projectInstructions, $projectChoices);
         echo "<div class='alert alert-success'>Project created successfully.</div>";
     } catch (Exception $e) {
         echo "<div class='alert alert-danger'>Error creating project: " . htmlspecialchars($e->getMessage()) . "</div>";
     }
 }
 
-function getProjects() {
-    global $pdo;
-    $stmt = $pdo->query("SELECT id, name FROM projects ORDER BY name");
-    return $stmt->fetchAll(PDO::FETCH_ASSOC);
+function handleUpdateProjectSettings() {
+    $projectId = $_POST['project_settings_id'];
+    $projectName = $_POST['project_settings_name'];
+    $projectInstructions = $_POST['project_settings_instructions'];
+    $projectChoices = $_POST['project_settings_choices'] ?? '';
+
+    try {
+        updateProjectSettings($projectId, $projectName, $projectInstructions, $projectChoices);
+        echo "<div class='alert alert-success'>Project settings updated successfully.</div>";
+    } catch (Exception $e) {
+        echo "<div class='alert alert-danger'>Error updating project settings: " . htmlspecialchars($e->getMessage()) . "</div>";
+    }
 }
 
 
@@ -212,7 +232,7 @@ function getProjects() {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Admin Dashboard</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
-	<link rel="stylesheet" href="css/style.css">
+    <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
 <nav class="navbar navbar-expand-lg navbar-light bg-light">
@@ -232,7 +252,7 @@ function getProjects() {
 
     <div class="container mt-5">
         <h1>Admin Dashboard</h1>
-			
+            
         
         <h2 class="mt-4">Import JSON</h2>
         <form method="post" enctype="multipart/form-data">
@@ -250,105 +270,48 @@ function getProjects() {
             </div>
             <button type="submit" name="import_json" class="btn btn-primary">Import JSON</button>
         </form>
-		
-		<h2 class="mt-4">Calculate Inter-Annotator Agreement</h2>
-			<form method="post">
-				<div class="mb-3">
-					<label for="kappa_project_id" class="form-label">Project</label>
-					<select class="form-select" id="kappa_project_id" name="kappa_project_id" required>
-						<?php foreach ($projects as $project): ?>
-							<option value="<?php echo $project['id']; ?>"><?php echo htmlspecialchars($project['name']); ?></option>
-						<?php endforeach; ?>
-					</select>
-				</div>
-				<button type="submit" name="calculate_kappa" class="btn btn-primary">Calculate Cohen's Kappa</button>
-			</form>
+        
+        <h2 class="mt-4">Agreement Statistics</h2>
+        <form method="post">
+            <div class="mb-3">
+                <label for="kappa_project_id" class="form-label">Project</label>
+                <select class="form-select" id="kappa_project_id" name="kappa_project_id" required>
+                    <?php foreach ($projects as $project): ?>
+                        <option value="<?php echo $project['id']; ?>"><?php echo htmlspecialchars($project['name']); ?></option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+            <button type="submit" name="calculate_agreement" class="btn btn-primary">Calculate Agreement Statistics</button>
+        </form>
 
-			<?php
-			if (isset($_POST['calculate_kappa'])) {
-				$projectId = $_POST['kappa_project_id'];
-				
-				// Get agreement data
-				$stmt = $pdo->prepare("
-					SELECT 
-						a1.user_id as rater1,
-						a2.user_id as rater2,
-						a1.decision as decision1,
-						a2.decision as decision2,
-						COUNT(*) as count
-					FROM annotations a1
-					JOIN annotations a2 
-						ON a1.snippet_id = a2.snippet_id
-						AND a1.user_id < a2.user_id
-					JOIN snippets s ON a1.snippet_id = s.id
-					WHERE s.project_id = ?
-					GROUP BY a1.user_id, a2.user_id, a1.decision, a2.decision
-				");
-				$stmt->execute([$projectId]);
-				$agreements = $stmt->fetchAll(PDO::FETCH_ASSOC);
-				
-				echo "<div class='alert alert-info mt-3'>";
-				
-				// Display contingency tables for each pair
-				$currentPair = null;
-				$contingencyTable = array();
-				
-				foreach ($agreements as $row) {
-					$pair = $row['rater1'] . '-' . $row['rater2'];
-					
-					if ($currentPair !== $pair) {
-						if ($currentPair !== null) {
-							displayContingencyTable($contingencyTable, $users);
-						}
-						$currentPair = $pair;
-						$contingencyTable = array(
-							array(0, 0),
-							array(0, 0)
-						);
-					}
-					
-					$contingencyTable[$row['decision1']][$row['decision2']] = $row['count'];
-				}
-				
-				// Display last pair
-				if ($currentPair !== null) {
-					displayContingencyTable($contingencyTable, $users);
-				}
-				
-				$kappaResults = calculateCohenKappa($projectId);
-				echo "<strong>Overall Cohen's Kappa: " . number_format($kappaResults, 4) . "</strong>";
-				echo "</div>";
-			}
+        <?php
+        if (isset($_POST['calculate_agreement'])) {
+            $projectId = $_POST['kappa_project_id'];
+            $projectChoices = getProjectDecisionChoices($projectId);
+            $choiceLabels = array_map(function($choice) {
+                return $choice['label'];
+            }, $projectChoices);
+            $kappaResults = calculateCohenKappa($projectId);
+            $krippendorffAlpha = calculateKrippendorffsAlpha($projectId);
 
-			function displayContingencyTable($table, $users) {
-				echo "<h4>Contingency Table:</h4>";
-				echo "<table class='table table-bordered w-auto'>";
-				echo "<tr><th></th><th>Rater 2 No</th><th>Rater 2 Yes</th></tr>";
-				echo "<tr><td>Rater 1 No</td><td>{$table[0][0]}</td><td>{$table[0][1]}</td></tr>";
-				echo "<tr><td>Rater 1 Yes</td><td>{$table[1][0]}</td><td>{$table[1][1]}</td></tr>";
-				echo "</table>";
-				
-				// Calculate observed agreement
-				$total = array_sum(array_map('array_sum', $table));
-				$agreed = $table[0][0] + $table[1][1];
-				$po = $agreed / $total;
-				
-				// Calculate expected agreement
-				$rater1_yes = ($table[1][0] + $table[1][1]) / $total;
-				$rater2_yes = ($table[0][1] + $table[1][1]) / $total;
-				$rater1_no = ($table[0][0] + $table[0][1]) / $total;
-				$rater2_no = ($table[0][0] + $table[1][0]) / $total;
-				$pe = ($rater1_yes * $rater2_yes) + ($rater1_no * $rater2_no);
-				
-				// Calculate kappa
-				$kappa = ($po - $pe) / (1 - $pe);
-				
-				echo "<p>Observed Agreement (Po): " . number_format($po, 4) . "</p>";
-				echo "<p>Expected Agreement (Pe): " . number_format($pe, 4) . "</p>";
-				echo "<p>Kappa: " . number_format($kappa, 4) . "</p>";
-				echo "<hr>";
-			}
-			?>
+            echo "<div class='alert alert-info mt-3'>";
+            echo "<p><strong>Choices:</strong> " . htmlspecialchars(implode(', ', $choiceLabels)) . "</p>";
+
+            if (is_string($kappaResults)) {
+                echo "<p><strong>Average Pairwise Cohen's Kappa:</strong> " . htmlspecialchars($kappaResults) . "</p>";
+            } else {
+                echo "<p><strong>Average Pairwise Cohen's Kappa:</strong> " . number_format($kappaResults, 4) . "</p>";
+            }
+
+            if ($krippendorffAlpha === null) {
+                echo "<p><strong>Krippendorff's Alpha (nominal):</strong> Not enough overlapping ratings.</p>";
+            } else {
+                echo "<p><strong>Krippendorff's Alpha (nominal):</strong> " . number_format($krippendorffAlpha, 4) . "</p>";
+            }
+
+            echo "</div>";
+        }
+        ?>
 
         <h2 class="mt-4">Annotator Consistency Check</h2>
         <form method="post">
@@ -364,37 +327,37 @@ function getProjects() {
         </form>
 
         <?php
-			if (isset($_POST['check_consistency'])) {
-				$consistencyResults = checkAnnotatorConsistency($_POST['consistency_project_id']);
-				echo "<div class='mt-3'>";
-				foreach ($consistencyResults as $annotatorId => $consistency) {
-					// Get username for the annotator ID
-					$annotatorUsername = '';
-					foreach ($users as $user) {
-						if ($user['id'] == $annotatorId) {
-							$annotatorUsername = $user['username'];
-							break;
-						}
-					}
-					echo "<div class='alert alert-info'>Annotator " . htmlspecialchars($annotatorUsername) . 
-						 " (ID: $annotatorId) Consistency: " . number_format($consistency * 100, 2) . "%</div>";
-				}
-				echo "</div>";
-			}
+            if (isset($_POST['check_consistency'])) {
+                $consistencyResults = checkAnnotatorConsistency($_POST['consistency_project_id']);
+                echo "<div class='mt-3'>";
+                foreach ($consistencyResults as $annotatorId => $consistency) {
+                    // Get username for the annotator ID
+                    $annotatorUsername = '';
+                    foreach ($users as $user) {
+                        if ($user['id'] == $annotatorId) {
+                            $annotatorUsername = $user['username'];
+                            break;
+                        }
+                    }
+                    echo "<div class='alert alert-info'>Annotator " . htmlspecialchars($annotatorUsername) . 
+                         " (ID: $annotatorId) Consistency: " . number_format($consistency * 100, 2) . "%</div>";
+                }
+                echo "</div>";
+            }
         ?>
 
-		 <h2 class="mt-4">Superannotator Tasks</h2>
-			<form action="superannotate.php" method="get" class="mb-4">
-				<div class="mb-3">
-					<label for="super_project_id" class="form-label">Select Project for Superannotation</label>
-					<select class="form-select" id="super_project_id" name="project_id" required>
-						<?php foreach ($projects as $project): ?>
-							<option value="<?php echo $project['id']; ?>"><?php echo htmlspecialchars($project['name']); ?></option>
-						<?php endforeach; ?>
-					</select>
-				</div>
-				<button type="submit" class="btn btn-primary">Go to Superannotation Task</button>
-			</form>
+         <h2 class="mt-4">Superannotator Tasks</h2>
+            <form action="superannotate.php" method="get" class="mb-4">
+                <div class="mb-3">
+                    <label for="super_project_id" class="form-label">Select Project for Superannotation</label>
+                    <select class="form-select" id="super_project_id" name="project_id" required>
+                        <?php foreach ($projects as $project): ?>
+                            <option value="<?php echo $project['id']; ?>"><?php echo htmlspecialchars($project['name']); ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                <button type="submit" class="btn btn-primary">Go to Superannotation Task</button>
+            </form>
 
         <h2 class="mt-4">Export JSON</h2>
         <form method="post">
@@ -419,10 +382,48 @@ function getProjects() {
                 <label for="project_instructions" class="form-label">Instructions</label>
                 <textarea class="form-control" id="project_instructions" name="project_instructions" rows="3"></textarea>
             </div>
+            <div class="mb-3">
+                <label for="project_choices" class="form-label">Choices</label>
+                <textarea class="form-control" id="project_choices" name="project_choices" rows="4" placeholder="Yes | 1 | yes&#10;No | 2 | no"></textarea>
+                <div class="form-text">One choice per line in the format Label | Shortcut | Value. Leave blank to use the default Yes/No choices.</div>
+            </div>
             <button type="submit" name="create_project" class="btn btn-primary">Create Project</button>
         </form>
-		
-		<h2 class="mt-4">User Management</h2>
+
+        <h2 class="mt-4">Update Project Settings</h2>
+        <form method="get" class="mb-3">
+            <div class="mb-3">
+                <label for="settings_project_id" class="form-label">Project</label>
+                <select class="form-select" id="settings_project_id" name="settings_project_id" required>
+                    <?php foreach ($projects as $project): ?>
+                        <option value="<?php echo $project['id']; ?>" <?php echo ((string) $project['id'] === (string) $selectedProjectSettingsId) ? 'selected' : ''; ?>><?php echo htmlspecialchars($project['name']); ?></option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+            <button type="submit" class="btn btn-outline-secondary">Load Project Settings</button>
+        </form>
+
+        <?php if ($selectedProjectSettings): ?>
+            <form method="post" class="mb-4">
+                <input type="hidden" name="project_settings_id" value="<?php echo $selectedProjectSettings['id']; ?>">
+                <div class="mb-3">
+                    <label for="project_settings_name" class="form-label">Project Name</label>
+                    <input type="text" class="form-control" id="project_settings_name" name="project_settings_name" value="<?php echo htmlspecialchars($selectedProjectSettings['name']); ?>" required>
+                </div>
+                <div class="mb-3">
+                    <label for="project_settings_instructions" class="form-label">Instructions</label>
+                    <textarea class="form-control" id="project_settings_instructions" name="project_settings_instructions" rows="3"><?php echo htmlspecialchars($selectedProjectSettings['instructions']); ?></textarea>
+                </div>
+                <div class="mb-3">
+                    <label for="project_settings_choices" class="form-label">Choices</label>
+                    <textarea class="form-control" id="project_settings_choices" name="project_settings_choices" rows="4"><?php echo htmlspecialchars(serializeDecisionChoicesToText(parseDecisionChoices($selectedProjectSettings['choice_schema'] ?? null))); ?></textarea>
+                    <div class="form-text">One choice per line in the format Label | Shortcut | Value.</div>
+                </div>
+                <button type="submit" name="update_project_settings" class="btn btn-primary">Update Project Settings</button>
+            </form>
+        <?php endif; ?>
+        
+        <h2 class="mt-4">User Management</h2>
         <form method="post" class="mb-3">
             <div class="mb-3">
                 <label for="username" class="form-label">Username</label>
@@ -509,10 +510,9 @@ function getProjects() {
                 </ul>
             <?php endif; ?>
         <?php endforeach; ?>
-		
     </div>
-	
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>
+

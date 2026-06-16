@@ -1,6 +1,6 @@
 <?php
 // Include the database configuration file
-require_once 'database.config.inc.php';
+require_once 'database_config.inc.php';
 
 try {
     $pdo = new PDO("mysql:host=$host;dbname=$database", $username, $password);

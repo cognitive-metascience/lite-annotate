@@ -9,34 +9,41 @@ if (!isLoggedIn() || !isSuperannotator()) {
 }
 
 $projectId = $_GET['project_id'] ?? null;
+$decisionError = null;
 
 if (!$projectId) {
     die('No project specified');
 }
 
 // Get project details
-$stmtProject = $pdo->prepare("SELECT name, instructions FROM projects WHERE id = ?");
-$stmtProject->execute([$projectId]);
-$projectDetails = $stmtProject->fetch(PDO::FETCH_ASSOC);
+$projectDetails = getProjectById($projectId);
+if (!$projectDetails) {
+    die('Project not found');
+}
+
+$projectChoices = parseDecisionChoices($projectDetails['choice_schema'] ?? null);
 
 // Initialize session for current snippet tracking
 if (session_status() == PHP_SESSION_NONE) {
     session_start();
 }
 
-// Get disagreement snippets if not in session
-if (!isset($_SESSION['disagreement_snippets'])) {
+// Get disagreement snippets if not in session or if the project changed
+if (!isset($_SESSION['disagreement_snippets']) || ($_SESSION['disagreement_project_id'] ?? null) != $projectId) {
     $_SESSION['disagreement_snippets'] = getSnippetsWithDisagreements($projectId);
     $_SESSION['current_disagreement_index'] = 0;
+    $_SESSION['disagreement_project_id'] = $projectId;
 }
 
 // Handle navigation
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $snippetId = $_POST['snippet_id'] ?? null;
     $decision = $_POST['decision'] ?? null;
-    if ($snippetId !== null && $decision !== null) {
+    if ($snippetId !== null && $decision !== null && isValidDecisionChoice($decision, $projectChoices)) {
         saveFinalDecision($snippetId, $decision);
         $_SESSION['current_disagreement_index']++;
+    } elseif ($decision !== null) {
+        $decisionError = 'Invalid final decision choice for this project.';
     }
 } elseif (isset($_GET['action'])) {
     if ($_GET['action'] === 'prev') {
@@ -58,7 +65,7 @@ $currentSnippet = $_SESSION['disagreement_snippets'][$_SESSION['current_disagree
 
 // Get the final decision
 if ($currentSnippet) {
-    $stmtFinalDecision = $pdo->prepare("SELECT decision FROM final_decisions WHERE snippet_id = ?");
+    $stmtFinalDecision = $pdo->prepare("SELECT decision FROM final_decisions WHERE snippet_id = ? ORDER BY id DESC LIMIT 1");
     $stmtFinalDecision->execute([$currentSnippet['id']]);
     $finalDecision = $stmtFinalDecision->fetchColumn();
 }
@@ -92,6 +99,9 @@ if ($currentSnippet) {
             <div class="progress-counter mb-3">
                 <p>Progress: <?php echo $_SESSION['current_disagreement_index'] + 1; ?> / <?php echo count($_SESSION['disagreement_snippets']); ?> disagreements reviewed</p>
             </div>
+            <?php if ($decisionError): ?>
+                <div class="alert alert-danger"><?php echo htmlspecialchars($decisionError); ?></div>
+            <?php endif; ?>
             
             <div class="snippet">
                 <?php echo highlightSnippet($currentSnippet['content'], $currentSnippet['highlight']); ?>
@@ -102,25 +112,41 @@ if ($currentSnippet) {
                 <?php foreach ($currentSnippet['annotations'] as $annotator => $decision): ?>
                     <div>
                         <?php echo htmlspecialchars($annotator); ?>: 
-                        <span class="<?php echo $decision == 1 ? 'text-success' : 'text-danger'; ?>">
-                            <?php echo $decision == 1 ? '✓ Yes' : '✗ No'; ?>
+                        <span class="badge bg-secondary">
+                            <?php echo htmlspecialchars(getDecisionLabel($decision, $projectChoices)); ?>
                         </span>
                     </div>
                 <?php endforeach; ?>
             </div>
-			<?php if (isset($finalDecision)): ?>
-				<div class="decision-summary mt-3">
-					<h6>Final Decision:</h6>
-					<div class="alert <?php echo $finalDecision == 1 ? 'alert-success' : 'alert-danger'; ?>">
-						<?php echo $finalDecision == 1 ? '✓ Valid' : '✗ Invalid'; ?>
-					</div>
-				</div>
-			<?php endif; ?>
+            <?php if (isset($finalDecision)): ?>
+                <div class="decision-summary mt-3">
+                    <h6>Final Decision:</h6>
+                    <div class="alert alert-info">
+                        <?php echo htmlspecialchars(getDecisionLabel($finalDecision, $projectChoices)); ?>
+                    </div>
+                </div>
+            <?php endif; ?>
 
             <form method="post" class="mt-3">
                 <input type="hidden" name="snippet_id" value="<?php echo $currentSnippet['id']; ?>">
-                <button type="submit" name="decision" value="1" id="yesButton" class="btn btn-success">Valid (Space)</button>
-                <button type="submit" name="decision" value="0" id="noButton" class="btn btn-danger">Invalid (N)</button>
+                <div class="d-flex flex-wrap gap-2">
+                    <?php foreach ($projectChoices as $index => $choice): ?>
+                        <button
+                            type="submit"
+                            name="decision"
+                            value="<?php echo htmlspecialchars($choice['value']); ?>"
+                            id="decisionButton<?php echo $index; ?>"
+                            data-shortcut="<?php echo htmlspecialchars($choice['shortcut']); ?>"
+                            class="btn btn-primary decision-button"
+                        >
+                            <?php echo htmlspecialchars($choice['label']); ?>
+                            <?php if ($choice['shortcut'] !== ''): ?>
+                                <span class="ms-1 opacity-75">(<?php echo htmlspecialchars($choice['shortcut']); ?>)</span>
+                            <?php endif; ?>
+                        </button>
+                    <?php endforeach; ?>
+                </div>
+                <div class="form-text mt-2">Use the number shown on a button to resolve the disagreement quickly.</div>
             </form>
 
             <div class="navigation mt-3">
@@ -135,13 +161,21 @@ if ($currentSnippet) {
 
     <script>
     document.addEventListener('keydown', function(event) {
-        if (event.code === 'Space') {
-            event.preventDefault(); // Prevent scrolling
-            document.getElementById('yesButton').click();
-        } else if (event.key === 'n' || event.key === 'N') {
-            document.getElementById('noButton').click();
+        var activeElement = document.activeElement;
+        if (activeElement && ['INPUT', 'TEXTAREA', 'SELECT'].includes(activeElement.tagName)) {
+            return;
+        }
+
+        var buttons = document.querySelectorAll('.decision-button');
+        for (var index = 0; index < buttons.length; index++) {
+            if (buttons[index].dataset.shortcut === event.key) {
+                event.preventDefault();
+                buttons[index].click();
+                break;
+            }
         }
     });
     </script>
 </body>
 </html>
+

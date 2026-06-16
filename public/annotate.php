@@ -10,6 +10,8 @@ if (!isLoggedIn() || !isAnnotator()) {
 
 $userId = $_SESSION['user_id'];
 $projectId = $_GET['project_id'] ?? null;
+$decisionError = null;
+$projectChoices = getDefaultDecisionChoices();
 
 // Get user's assigned projects
 $userProjects = getUserProjects($userId);
@@ -27,10 +29,13 @@ if ($projectId) {
         die('You are not assigned to this project');
     }
 
-	// Get project name and instructions
-    $stmtProject = $pdo->prepare("SELECT name, instructions FROM projects WHERE id = ?");
-    $stmtProject->execute([$projectId]);
-    $projectDetails = $stmtProject->fetch(PDO::FETCH_ASSOC);
+    // Get project name, instructions, and choice schema
+    $projectDetails = getProjectById($projectId);
+    if (!$projectDetails) {
+        die('Project not found');
+    }
+
+    $projectChoices = parseDecisionChoices($projectDetails['choice_schema'] ?? null);
     $projectName = $projectDetails['name'];
     $projectInstructions = $projectDetails['instructions'];
 
@@ -40,7 +45,7 @@ if ($projectId) {
     $totalSnippets = $stmtTotal->fetchColumn();
 
     // Get number of annotated snippets for this user and project
-    $stmtAnnotated = $pdo->prepare("SELECT COUNT(*) FROM annotations WHERE user_id = ? AND snippet_id IN (SELECT id FROM snippets WHERE project_id = ?)");
+    $stmtAnnotated = $pdo->prepare("SELECT COUNT(DISTINCT snippet_id) FROM annotations WHERE user_id = ? AND snippet_id IN (SELECT id FROM snippets WHERE project_id = ?)");
     $stmtAnnotated->execute([$userId, $projectId]);
     $annotatedSnippets = $stmtAnnotated->fetchColumn();
 
@@ -59,9 +64,11 @@ if ($projectId) {
 
     if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $decision = $_POST['decision'] ?? null;
-        if ($decision !== null) {
+        if ($decision !== null && isValidDecisionChoice($decision, $projectChoices)) {
             saveAnnotation($userId, $currentId, $decision);
             $currentId++;
+        } elseif ($decision !== null) {
+            $decisionError = 'Invalid annotation choice for this project.';
         }
     } elseif (isset($_GET['action'])) {
         if ($_GET['action'] === 'prev') {
@@ -136,7 +143,7 @@ if ($projectId) {
             </div>
         </div>
     </nav>
-	
+    
     <div class="container mt-5">
     <?php if (!$projectId): ?>
         <h2>Select a Project</h2>
@@ -161,10 +168,16 @@ if ($projectId) {
                 <div class="progress-bar" role="progressbar" style="width: <?php echo ($annotatedSnippets / $totalSnippets) * 100; ?>%" aria-valuenow="<?php echo $annotatedSnippets; ?>" aria-valuemin="0" aria-valuemax="<?php echo $totalSnippets; ?>"></div>
             </div>
         </div>
+        <?php if ($decisionError): ?>
+            <div class="alert alert-danger"><?php echo htmlspecialchars($decisionError); ?></div>
+        <?php endif; ?>
         <p>
             Current Snippet ID: <?php echo $snippet['id']; ?>
             <?php if ($snippet['is_annotated']): ?>
                 <span class="text-success">✓ Annotated</span>
+                <?php if (!empty($snippet['decision'])): ?>
+                    <span class="ms-2 text-muted">Current decision: <?php echo htmlspecialchars(getDecisionLabel($snippet['decision'], $projectChoices)); ?></span>
+                <?php endif; ?>
             <?php else: ?>
                 <span class="text-danger">✗ Not annotated</span>
             <?php endif; ?>
@@ -173,8 +186,24 @@ if ($projectId) {
             <?php echo highlightSnippet($snippet['content'], $snippet['highlight']); ?>
         </div>
         <form method="post" class="mt-3">
-            <button type="submit" name="decision" value="1" id="yesButton" class="btn btn-success">Yes</button>
-            <button type="submit" name="decision" value="0" id="noButton" class="btn btn-danger">No</button>
+            <div class="d-flex flex-wrap gap-2">
+                <?php foreach ($projectChoices as $index => $choice): ?>
+                    <button
+                        type="submit"
+                        name="decision"
+                        value="<?php echo htmlspecialchars($choice['value']); ?>"
+                        id="decisionButton<?php echo $index; ?>"
+                        data-shortcut="<?php echo htmlspecialchars($choice['shortcut']); ?>"
+                        class="btn btn-primary decision-button"
+                    >
+                        <?php echo htmlspecialchars($choice['label']); ?>
+                        <?php if ($choice['shortcut'] !== ''): ?>
+                            <span class="ms-1 opacity-75">(<?php echo htmlspecialchars($choice['shortcut']); ?>)</span>
+                        <?php endif; ?>
+                    </button>
+                <?php endforeach; ?>
+            </div>
+            <div class="form-text mt-2">Use the number shown on a button to submit that choice quickly.</div>
         </form>
         <div class="navigation mt-3">
             <a href="?project_id=<?php echo $projectId; ?>&action=prev" class="btn btn-secondary">Previous</a>
@@ -193,18 +222,24 @@ if ($projectId) {
 
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
-    <script src="js/annotation.js"></script>
-
 <script>
 document.addEventListener('keydown', function(event) {
-    if (event.code === 'Space') {
-        event.preventDefault(); // Prevent scrolling
-        document.getElementById('yesButton').click();
-    } else if (event.key === 'n' || event.key === 'N') {
-        document.getElementById('noButton').click();
+    var activeElement = document.activeElement;
+    if (activeElement && ['INPUT', 'TEXTAREA', 'SELECT'].includes(activeElement.tagName)) {
+        return;
+    }
+
+    var buttons = document.querySelectorAll('.decision-button');
+    for (var index = 0; index < buttons.length; index++) {
+        if (buttons[index].dataset.shortcut === event.key) {
+            event.preventDefault();
+            buttons[index].click();
+            break;
+        }
     }
 });
 </script>
 
 </body>
 </html>
+

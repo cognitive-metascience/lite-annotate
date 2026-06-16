@@ -1,4 +1,43 @@
 <?php
+require_once __DIR__ . '/annotation_core.php';
+
+function getProjects() {
+    global $pdo;
+    $stmt = $pdo->query("SELECT id, name, instructions, choice_schema FROM projects ORDER BY name");
+    return $stmt->fetchAll(PDO::FETCH_ASSOC);
+}
+
+function getProjectById($projectId) {
+    global $pdo;
+    $stmt = $pdo->prepare("SELECT id, name, instructions, choice_schema FROM projects WHERE id = ? LIMIT 1");
+    $stmt->execute([$projectId]);
+    return $stmt->fetch(PDO::FETCH_ASSOC);
+}
+
+function getProjectDecisionChoices($projectId) {
+    $project = getProjectById($projectId);
+
+    if (!$project) {
+        return getDefaultDecisionChoices();
+    }
+
+    return parseDecisionChoices($project['choice_schema'] ?? null);
+}
+
+function createProject($projectName, $projectInstructions, $projectChoicesText) {
+    global $pdo;
+    $choiceSchema = serializeDecisionChoices(buildDecisionChoicesFromText($projectChoicesText));
+    $stmt = $pdo->prepare("INSERT INTO projects (name, instructions, choice_schema) VALUES (?, ?, ?)");
+    return $stmt->execute([$projectName, $projectInstructions, $choiceSchema]);
+}
+
+function updateProjectSettings($projectId, $projectName, $projectInstructions, $projectChoicesText) {
+    global $pdo;
+    $choiceSchema = serializeDecisionChoices(buildDecisionChoicesFromText($projectChoicesText));
+    $stmt = $pdo->prepare("UPDATE projects SET name = ?, instructions = ?, choice_schema = ? WHERE id = ?");
+    return $stmt->execute([$projectName, $projectInstructions, $choiceSchema, $projectId]);
+}
+
 function getCurrentSnippet($userId, $projectId) {
     global $pdo;
     $stmt = $pdo->prepare("
@@ -32,15 +71,27 @@ function getSpecificSnippet($userId, $projectId, $snippetId) {
 
 function getAnnotatedSnippetsCount($userId, $projectId) {
     global $pdo;
-    $stmt = $pdo->prepare("SELECT COUNT(*) FROM annotations WHERE user_id = ? AND snippet_id IN (SELECT id FROM snippets WHERE project_id = ?)");
+    $stmt = $pdo->prepare("SELECT COUNT(DISTINCT snippet_id) FROM annotations WHERE user_id = ? AND snippet_id IN (SELECT id FROM snippets WHERE project_id = ?)");
     $stmt->execute([$userId, $projectId]);
     return $stmt->fetchColumn();
 }
 
 function saveAnnotation($userId, $snippetId, $decision) {
     global $pdo;
-    $stmt = $pdo->prepare("INSERT INTO annotations (user_id, snippet_id, decision) VALUES (?, ?, ?)");
-    $stmt->execute([$userId, $snippetId, $decision]);
+    $pdo->beginTransaction();
+
+    try {
+        $stmt = $pdo->prepare("DELETE FROM annotations WHERE user_id = ? AND snippet_id = ?");
+        $stmt->execute([$userId, $snippetId]);
+
+        $stmt = $pdo->prepare("INSERT INTO annotations (user_id, snippet_id, decision) VALUES (?, ?, ?)");
+        $stmt->execute([$userId, $snippetId, $decision]);
+
+        $pdo->commit();
+    } catch (Exception $exception) {
+        $pdo->rollBack();
+        throw $exception;
+    }
 }
 
 function highlightSnippet($content, $highlight) {
@@ -54,8 +105,8 @@ function getSnippetsWithDisagreements($projectId) {
     global $pdo;
     
     $query = "SELECT s.id, s.content, s.highlight, 
-              GROUP_CONCAT(a.decision) as decisions,
-              GROUP_CONCAT(u.username) as annotators
+              GROUP_CONCAT(a.decision ORDER BY a.user_id) as decisions,
+              GROUP_CONCAT(u.username ORDER BY a.user_id) as annotators
               FROM snippets s
               JOIN annotations a ON s.id = a.snippet_id
               JOIN users u ON a.user_id = u.id
@@ -70,7 +121,7 @@ function getSnippetsWithDisagreements($projectId) {
     while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
         $decisions = explode(',', $row['decisions']);
         $annotators = explode(',', $row['annotators']);
-        $annotations = array_combine($annotators, $decisions);
+        $annotations = combineAnnotatorDecisions($annotators, $decisions);
         
         $snippets[] = [
             'id' => $row['id'],
@@ -86,8 +137,20 @@ function getSnippetsWithDisagreements($projectId) {
 
 function saveFinalDecision($snippetId, $decision) {
     global $pdo;
-    $stmt = $pdo->prepare("INSERT INTO final_decisions (snippet_id, decision) VALUES (?, ?)");
-    $stmt->execute([$snippetId, $decision]);
+    $pdo->beginTransaction();
+
+    try {
+        $stmt = $pdo->prepare("DELETE FROM final_decisions WHERE snippet_id = ?");
+        $stmt->execute([$snippetId]);
+
+        $stmt = $pdo->prepare("INSERT INTO final_decisions (snippet_id, decision) VALUES (?, ?)");
+        $stmt->execute([$snippetId, $decision]);
+
+        $pdo->commit();
+    } catch (Exception $exception) {
+        $pdo->rollBack();
+        throw $exception;
+    }
 }
 
 function calculateCohenKappa($projectId) {
@@ -120,6 +183,33 @@ function calculateCohenKappa($projectId) {
     return array_sum($kappas) / count($kappas);
 }
 
+function calculateKrippendorffsAlpha($projectId) {
+    global $pdo;
+
+    $stmt = $pdo->prepare(" 
+        SELECT a.snippet_id, a.decision
+        FROM annotations a
+        JOIN snippets s ON a.snippet_id = s.id
+        WHERE s.project_id = ?
+        ORDER BY a.snippet_id, a.user_id
+    ");
+    $stmt->execute([$projectId]);
+    $ratings = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+    $units = [];
+    foreach ($ratings as $rating) {
+        $snippetId = $rating['snippet_id'];
+
+        if (!isset($units[$snippetId])) {
+            $units[$snippetId] = [];
+        }
+
+        $units[$snippetId][] = $rating['decision'];
+    }
+
+    return calculateNominalKrippendorffsAlpha(array_values($units));
+}
+
 function calculatePairwiseKappa($projectId, $annotator1, $annotator2) {
     global $pdo;
     
@@ -134,24 +224,8 @@ function calculatePairwiseKappa($projectId, $annotator1, $annotator2) {
     ");
     $stmt->execute([$annotator1, $annotator2, $projectId]);
     $annotations = $stmt->fetchAll(PDO::FETCH_ASSOC);
-    
-    $n = count($annotations);
-    $n1 = $n2 = $n12 = 0;
-    
-    foreach ($annotations as $annotation) {
-        if ($annotation['decision1'] == 1) $n1++;
-        if ($annotation['decision2'] == 1) $n2++;
-        if ($annotation['decision1'] == 1 && $annotation['decision2'] == 1) $n12++;
-    }
-    
-    $p1 = $n1 / $n;
-    $p2 = $n2 / $n;
-    $pe = $p1 * $p2 + (1 - $p1) * (1 - $p2);
-    $po = ($n12 + ($n - $n1 - $n2 + $n12)) / $n;
-    
-    $kappa = ($po - $pe) / (1 - $pe);
-    
-    return $kappa;
+
+    return calculateNominalCohenKappa($annotations) ?? 0.0;
 }
 
 function checkAnnotatorConsistency($projectId) {
